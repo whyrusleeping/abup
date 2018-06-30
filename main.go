@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"time"
 
 	"github.com/urfave/cli"
@@ -14,15 +15,21 @@ import (
 	host "gx/ipfs/QmNmJZL7FQySMtE2BQuLMuZg2EB2CLEunJJUSVSc9YnnbV/go-libp2p-host"
 	ma "gx/ipfs/QmWWQ2Txc2c6tqjsBpzg5Ar652cHPGNsQQp2SejkNmkUMb/go-multiaddr"
 	ds "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore"
+	pstore "gx/ipfs/QmXauCuJzmzapetmC6W4TuDJLL1yFFrVzSHoWv8YdbmnxH/go-libp2p-peerstore"
 	none "gx/ipfs/QmXtoXbu9ReyV6Q4kDQ5CF9wXQNDY1PdHc4HhfxRR5AHB3/go-ipfs-routing/none"
 	"gx/ipfs/QmZNkThpqfVXs9GNbexPrfBbXSLNYeKrE7jwFM2oqHbyqN/go-libp2p-protocol"
 	peer "gx/ipfs/QmZoWKhxUmZ2seW4BzX6fJkNR8hh9PsGModr7q171yq2SS/go-libp2p-peer"
 	bstore "gx/ipfs/QmaG4DZ4JaqEfvPWt5nPPgoTzhc1tr1T3f4Nu9Jpdm8ymY/go-ipfs-blockstore"
+	bserv "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/blockservice"
 	"gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/core/coreunix"
 	"gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/exchange/bitswap"
 	bsnet "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/exchange/bitswap/network"
+	dag "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/merkledag"
+	pin "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/pin"
+	hamt "gx/ipfs/QmcYBp5EDnJKfVN63F71rDTksvEf1cfijwCTWtw6bPG58T/go-hamt-ipld"
 	cid "gx/ipfs/QmcZfnkapfECQGcLZaf9B79NRg7cRa9EnZh4LSbkCzwNvY/go-cid"
 	"gx/ipfs/QmceUdzxkimdYsgtX733uNgzf1DLHyBKN6ehGSp85ayppM/go-ipfs-cmdkit/files"
+	ipld "gx/ipfs/Qme5bWv7wtjUNGsK2BNGVUFPKiuxWrsqrtvYwCLRw8YFES/go-ipld-format"
 )
 
 var _ = ma.LengthPrefixedVarSize
@@ -34,7 +41,10 @@ var ProtocolHead = protocol.ID("/abup/head")
 type ClientNode struct {
 	host   host.Host
 	bswap  *bitswap.Bitswap
-	bstore bstore.Blockstore
+	bstore bstore.GCBlockstore
+	ds     ds.Datastore
+	dserv  ipld.DAGService
+	cstore *hamt.CborIpldStore
 
 	serverID peer.ID
 }
@@ -79,7 +89,17 @@ func (cn *ClientNode) PutSyncRequest(sr *SyncRequest) error {
 	return nil
 }
 
-func startClientNode() (*ClientNode, error) {
+func startClientNode(server string) (*ClientNode, error) {
+	addr, err := ma.NewMultiaddr(server)
+	if err != nil {
+		return nil, err
+	}
+
+	pinfo, err := pstore.InfoFromP2pAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx := context.Background()
 	h, err := libp2p.New(ctx)
 	if err != nil {
@@ -88,14 +108,26 @@ func startClientNode() (*ClientNode, error) {
 
 	mapds := ds.NewMapDatastore()
 	bs := bstore.NewBlockstore(mapds)
+	gcbs := bstore.NewGCBlockstore(bs, bstore.NewGCLocker())
 	route, _ := none.ConstructNilRouting(nil, nil, nil)
 	bnet := bsnet.NewFromIpfsHost(h, route)
-	bswap := bitswap.New(ctx, bnet, bs)
+	bswap := bitswap.New(ctx, bnet, gcbs)
+	dserv := dag.NewDAGService(bserv.New(gcbs, bswap))
+
+	cstore := &hamt.CborIpldStore{bserv.New(bs, bswap)}
+
+	if err := h.Connect(ctx, *pinfo); err != nil {
+		return nil, err
+	}
 
 	return &ClientNode{
-		host:   h,
-		bswap:  bswap.(*bitswap.Bitswap),
-		bstore: bs,
+		host:     h,
+		bswap:    bswap.(*bitswap.Bitswap),
+		bstore:   gcbs,
+		ds:       mapds,
+		dserv:    dserv,
+		cstore:   cstore,
+		serverID: pinfo.ID,
 	}, nil
 }
 
@@ -103,7 +135,7 @@ type SyncRequest struct {
 	NewObj    *cid.Cid
 	Path      string
 	Host      string
-	Timestamp time.Time
+	Timestamp int64
 }
 
 type SyncResponse struct {
@@ -112,9 +144,15 @@ type SyncResponse struct {
 
 var saveCommand = cli.Command{
 	Name: "save",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:   "server",
+			EnvVar: "ABUP_SERVER",
+		},
+	},
 	Action: func(c *cli.Context) error {
 		arg := c.Args().First()
-		dir, fname := filepath.Split(arg)
+		_, fname := filepath.Split(arg)
 
 		finfo, err := os.Stat(arg)
 		if err != nil {
@@ -126,7 +164,18 @@ var saveCommand = cli.Command{
 			return err
 		}
 
-		adder, err := coreunix.NewAdder(context.Background(), pinner, bstore, dagserv)
+		server := c.String("server")
+		if server == "" {
+			return fmt.Errorf("must pass server flag")
+		}
+		cn, err := startClientNode(server)
+		if err != nil {
+			return err
+		}
+
+		pinner := pin.NewPinner(cn.ds, cn.dserv, cn.dserv)
+
+		adder, err := coreunix.NewAdder(context.Background(), pinner, cn.bstore, cn.dserv)
 		if err != nil {
 			return err
 		}
@@ -140,16 +189,16 @@ var saveCommand = cli.Command{
 			return err
 		}
 
-		cn, err := startClientNode()
+		abspath, err := filepath.Abs(arg)
 		if err != nil {
 			return err
 		}
 
 		sr := &SyncRequest{
 			NewObj:    nd.Cid(),
-			Path:      arg,
+			Path:      abspath,
 			Host:      "mycomputersname",
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixNano(),
 		}
 
 		if err := cn.PutSyncRequest(sr); err != nil {
@@ -162,19 +211,80 @@ var saveCommand = cli.Command{
 
 var listCommand = cli.Command{
 	Name: "list",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:   "server",
+			EnvVar: "ABUP_SERVER",
+		},
+	},
 	Action: func(c *cli.Context) error {
-		cn, err := startClientNode()
+		cn, err := startClientNode(c.String("server"))
 		if err != nil {
 			return err
+		}
+
+		head, err := cn.Head()
+		if err != nil {
+			return err
+		}
+
+		for head != nil {
+			var rec Record
+			ctx := context.Background()
+			if err := cn.cstore.Get(ctx, head, &rec); err != nil {
+				return err
+			}
+			head = rec.Prev
+
+			if rec.Val == nil {
+				fmt.Println("<empty>")
+				continue
+			}
+			fmt.Println(rec.Val.Path)
 		}
 
 		return nil
 	},
 }
 
+var serveCommand = cli.Command{
+	Name: "serve",
+	Action: func(c *cli.Context) error {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+
+		sn, err := startServerNode(cwd)
+		if err != nil {
+			panic(err)
+		}
+
+		for _, a := range sn.host.Addrs() {
+			fmt.Printf("%s/ipfs/%s\n", a, sn.host.ID().Pretty())
+		}
+		select {}
+	},
+}
+
+var initServerCommand = cli.Command{
+	Name: "init-server",
+	Action: func(c *cli.Context) error {
+
+	},
+}
+
 func main() {
+	fi, _ := os.Create("profile")
+	defer fi.Close()
+	pprof.StartCPUProfile(fi)
+	defer pprof.StopCPUProfile()
+
 	app := cli.NewApp()
 	app.Commands = []cli.Command{
 		saveCommand,
+		listCommand,
+		serveCommand,
 	}
+	app.RunAndExitOnError()
 }
