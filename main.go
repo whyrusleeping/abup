@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/urfave/cli"
+
+	//github.com/zalando/go-keyring // this looks neat for password management
 
 	libp2p "gx/ipfs/QmNh1kGFFdsPu79KNSaL4NUKUPb4Eiz4KHdMtFY6664RDp/go-libp2p"
 	host "gx/ipfs/QmNmJZL7FQySMtE2BQuLMuZg2EB2CLEunJJUSVSc9YnnbV/go-libp2p-host"
@@ -20,6 +23,7 @@ import (
 	"gx/ipfs/QmZNkThpqfVXs9GNbexPrfBbXSLNYeKrE7jwFM2oqHbyqN/go-libp2p-protocol"
 	peer "gx/ipfs/QmZoWKhxUmZ2seW4BzX6fJkNR8hh9PsGModr7q171yq2SS/go-libp2p-peer"
 	bstore "gx/ipfs/QmaG4DZ4JaqEfvPWt5nPPgoTzhc1tr1T3f4Nu9Jpdm8ymY/go-ipfs-blockstore"
+	crypto "gx/ipfs/QmaPbCnUMBohSGo3KnxEa2bHqyJVVeEEcwtqJAYxerieBo/go-libp2p-crypto"
 	bserv "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/blockservice"
 	"gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/core/coreunix"
 	"gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/exchange/bitswap"
@@ -270,6 +274,41 @@ var serveCommand = cli.Command{
 var initServerCommand = cli.Command{
 	Name: "init-server",
 	Action: func(c *cli.Context) error {
+		if _, err := os.Stat("config"); err == nil {
+			return fmt.Errorf("already initialized!")
+		}
+
+		sc := ServerConfig{}
+		fi, err := os.Create("config")
+		if err != nil {
+			return err
+		}
+		defer fi.Close()
+
+		if err := json.NewEncoder(fi).Encode(sc); err != nil {
+			return err
+		}
+
+		priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
+		if err != nil {
+			return err
+		}
+
+		identkey, err := os.Create("identity.key")
+		if err != nil {
+			return err
+		}
+		defer identkey.Close()
+
+		skb, err := priv.Bytes()
+		if err != nil {
+			return err
+		}
+
+		if _, err := identkey.Write(skb); err != nil {
+			return err
+		}
+
 		return nil
 	},
 }
@@ -285,6 +324,7 @@ func main() {
 		saveCommand,
 		listCommand,
 		serveCommand,
+		initServerCommand,
 	}
 	app.RunAndExitOnError()
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,6 +16,7 @@ import (
 	inet "gx/ipfs/QmXfkENeeBvh3zYA51MaSdGUdBjhQ99cP5WQe8zgr6wchG/go-libp2p-net"
 	none "gx/ipfs/QmXtoXbu9ReyV6Q4kDQ5CF9wXQNDY1PdHc4HhfxRR5AHB3/go-ipfs-routing/none"
 	bstore "gx/ipfs/QmaG4DZ4JaqEfvPWt5nPPgoTzhc1tr1T3f4Nu9Jpdm8ymY/go-ipfs-blockstore"
+	crypto "gx/ipfs/QmaPbCnUMBohSGo3KnxEa2bHqyJVVeEEcwtqJAYxerieBo/go-libp2p-crypto"
 	bserv "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/blockservice"
 	"gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/exchange/bitswap"
 	bsnet "gx/ipfs/QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB/go-ipfs/exchange/bitswap/network"
@@ -116,15 +118,35 @@ func loadConfig(fname string) (*ServerConfig, error) {
 	return &sc, nil
 }
 
+func loadKey(fname string) (crypto.PrivKey, error) {
+	fi, err := os.Open(fname)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := ioutil.ReadAll(fi)
+	if err != nil {
+		return nil, err
+	}
+
+	return crypto.UnmarshalPrivateKey(data)
+}
+
 func startServerNode(dir string) (*ServerNode, error) {
 	conf, err := loadConfig(filepath.Join(dir, "config"))
 	if err != nil {
 		return nil, err
 	}
 
+	key, err := loadKey(filepath.Join(dir, "identity.key"))
+	if err != nil {
+		return nil, err
+	}
+
 	ctx := context.Background()
 	opt := libp2p.ListenAddrStrings(conf.GetListenAddr())
-	h, err := libp2p.New(ctx, opt)
+	identopt := libp2p.Identity(key)
+	h, err := libp2p.New(ctx, opt, identopt)
 	if err != nil {
 		return nil, err
 	}
