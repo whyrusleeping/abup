@@ -270,7 +270,7 @@ var serveCommand = cli.Command{
 var initServerCommand = cli.Command{
 	Name: "init-server",
 	Action: func(c *cli.Context) error {
-
+		return nil
 	},
 }
 
