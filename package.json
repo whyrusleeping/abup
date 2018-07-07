@@ -6,15 +6,15 @@
   },
   "gxDependencies": [
     {
-      "hash": "QmcKwjeebv5SX3VFUGDFa4BNMYhy14RRaCzQP7JN3UQDpB",
+      "hash": "QmZXt1wdwnPVWDMjssyLUbuJFt73FT7uVE5qcNyYGzdRfm",
       "name": "go-ipfs",
-      "version": "0.4.15"
+      "version": "0.4.16"
     },
     {
       "author": "why",
-      "hash": "QmcYBp5EDnJKfVN63F71rDTksvEf1cfijwCTWtw6bPG58T",
+      "hash": "QmbasjzUYSMFwyFYRu6EX8727FrTTAGNUEGoM76uqPAERK",
       "name": "go-hamt-ipld",
-      "version": "0.0.8"
+      "version": "0.0.9"
     }
   ],
   "gxVersion": "0.12.1",
